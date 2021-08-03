@@ -1,0 +1,242 @@
+---
+title: "NYPD Shooting Incidents"
+author: "AM"
+date: "17/07/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(scales)
+library(caret)
+library(ggalluvial)
+```
+
+## Fetch Data
+
+Get the CSV from cityofnewyork.us
+
+```{r fetch}
+url_input = "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv"
+```
+
+## Import Data
+
+```{r import}
+# use stringsAsFactors so that we don't have to do it later
+nypd_data = read.csv(url_input, stringsAsFactors = TRUE)
+
+```
+
+## Inspect and Clean Data
+* Change date and time to appropriate formats
+* Remove Lon_Lat since it's redundant
+* Convert STATISTICAL_MURDER_FLAG to boolean
+* Convert X and Y Coords to integers (or NA)
+
+## Important Things to Note
+From the data footnotes:
+
+* Multiple victims at the same incident have the same Incident Key. This is the only way we have of knowing if it was a multiple victim incident
+* Statistical Murder Flag is when the victim died and is a homicide
+
+
+```{r inspect}
+nypd_data_edited = nypd_data %>%
+  select(-c("Lon_Lat")) %>%
+  mutate(
+    OCCUR_DATE = mdy(OCCUR_DATE), 
+    OCCUR_TIME = hms(OCCUR_TIME),
+    STATISTICAL_MURDER_FLAG = as.logical(STATISTICAL_MURDER_FLAG),
+    X_COORD_CD = as.integer(X_COORD_CD),
+    Y_COORD_CD = as.integer(Y_COORD_CD)
+  )
+# nypd_data_edited
+summary(nypd_data_edited)
+
+```
+
+A lot of the categorical columns contain values that are missing or unknown. I'm not going to exclude them for a look at the overall trend. Some entries are missing X and Y coordinates, and some age range values are impossible (eg 1020).
+
+## Visualization
+Let's look at the overall amount of shooting incidents and homicides over the whole time period. 
+
+```{r overall}
+timeline_combined <- ggplot(nypd_data_edited, aes(x=OCCUR_DATE, fill=STATISTICAL_MURDER_FLAG)) +
+  geom_histogram(binwidth = 20) +
+  scale_x_date(breaks=date_breaks("1 year"), date_labels = "%Y", expand = c(0.025, 0), guide = guide_axis(angle = 45)) +
+  scale_fill_discrete(name ="", labels = c("Incident", "Homicide")) + 
+  ggtitle("NYPD Reported Shooting Incidents and Homicides 2006-2020") +
+  xlab("Year") +
+  ylab("Count") 
+timeline_combined
+```
+```{r output1, include=FALSE}
+ggsave(file="graph1.svg", plot = timeline_combined, height = 9, width = 16)
+```
+
+
+There seems to be a yearly cycle with incidents peaking in the summer and hitting low points in the winter. There is a gradual decrease in the number of incidents starting in 2012, and a smaller decrease in homicides as well. It's interesting to see that there is a spike of both incidents and homicides near the start of the pandemic. I don't think that this dataset has enough information to tell us why. 
+
+Let's average across each year to get an idea of the annual trend. 
+
+```{r annual}
+annual = nypd_data_edited %>%
+  mutate(Year = as.factor(year(nypd_data_edited$OCCUR_DATE))) %>%
+  mutate(Day = yday(nypd_data_edited$OCCUR_DATE)) %>%
+  group_by(Day, Year, STATISTICAL_MURDER_FLAG) %>% summarise(n = n()) %>%
+  ungroup()
+
+annual = annual %>%
+  group_by(Day, STATISTICAL_MURDER_FLAG) %>% summarise(mean_n = mean(n))
+
+ann = ggplot(annual, aes(x=as.Date(Day, origin = "2006-01-01"), y=mean_n, group=STATISTICAL_MURDER_FLAG)) +
+  geom_line(aes(color=STATISTICAL_MURDER_FLAG)) +
+  scale_x_date(breaks=date_breaks("1 month"), date_labels = "%b") + 
+  scale_color_hue(name="", labels = c("Incident", "Homicide")) +
+  ggtitle("Averaged Annual Shooting Incidents and Homicides 2006-2020") +
+  xlab("Year") +
+  ylab("Average Count")
+ann
+```
+```{r output_ann, include=FALSE}
+ggsave(file="graph_annual.svg", plot = ann, height = 4.5, width = 8)
+```
+
+Shooting incidents almost double during the summer. Homicides show a pretty constant trend throughout the year, with a slight increase in summer months. There is a spike in incidents on January 1st. 
+
+Let's look at homicide victims.
+
+```{r homicide_victims}
+# Only consider incidents that were a homicide
+hom_vics = filter(nypd_data_edited, STATISTICAL_MURDER_FLAG == TRUE)
+cts = hom_vics %>% count(Race = hom_vics$VIC_RACE) 
+
+pi = ggplot(cts, aes(x="", y=n, fill=Race)) +
+  geom_bar(width = 1, stat = "identity") +
+  ggtitle("NYC Homicide Victims by Race 2006-2020") +
+  coord_polar("y", start=0) +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5), color = "White") +
+  theme_void()
+pi
+```
+```{r output2, include=FALSE}
+ggsave(file="graph2.svg", plot = pi, height = 4.5, width = 8)
+```
+
+Black and Hispanic people account for the majority of homicide victims over this time span. There are some cases where race is unknown. There is no way for us to know if this means mixed race or if it just wasn't recorded. It would be interesting to see how the overall population demographics compare to this table. 
+
+---
+
+Let's look at how perpetrator and victim races compare. 
+
+```{r alluvial}
+alluv_table = nypd_data_edited %>%
+  group_by(VIC_RACE, PERP_RACE, STATISTICAL_MURDER_FLAG) %>%
+  count()
+
+al = ggplot(alluv_table, aes(axis1 = PERP_RACE, axis2 = VIC_RACE, y = n)) +
+  geom_alluvium(aes(fill = STATISTICAL_MURDER_FLAG), decreasing = FALSE) +
+  geom_stratum(fill = "white") +
+  stat_stratum(decreasing = FALSE) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), decreasing = FALSE) +
+  scale_x_discrete(limits = c("Perp Race", "Victim Race"),
+                   expand = c(.1, .1)) +
+  labs(title = "Shooting Incidents by Race",
+       subtitle = "Stratified by perpetrator and victim race and homicide",
+       y = "Incidents") +
+  scale_fill_manual(values = c("blue", "red")) +
+  theme_minimal() +
+  guides(fill = guide_legend(title = "Homicide"))
+al
+```
+```{r alluv_output, include=FALSE}
+ggsave(file="graph_alluv.svg", plot = al, height = 9, width = 16)
+```
+
+There are a lot of perpetrators where their race was missing, and not unknown. Maybe it's when the NYPD didn't catch the perpetrator and so only had information on the victim. 
+
+---
+
+Let's look at perpetrator demographics. Entries with no perpetrator race or an unrealistic age group are omitted. 
+
+```{r perp_demo}
+perps = nypd_data_edited %>% group_by(PERP_AGE_GROUP, PERP_RACE, PERP_SEX) %>% summarize(n = n())
+# filter out entries with no data and weird age values
+perps = filter(perps, PERP_RACE != "" & PERP_AGE_GROUP %in% c("<18","18-24","25-44","45-64","65+","UNKNOWN"))
+
+bar = ggplot(perps, aes(x=PERP_AGE_GROUP, y=n, fill=PERP_RACE)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  ggtitle("Perpetrators of NYC Shooting Incidents by Age and Race") +
+  xlab("Age Group") + 
+  ylab("Number") +
+  scale_fill_discrete(name ="Race")
+bar
+```
+```{r output3, include=FALSE}
+ggsave(file="graph3.svg", plot = bar, height = 4.5, width = 8)
+```
+
+
+It looks like there are a lot of young, Black or Hispanic perpetrators. I hid entries where age was not present (but not unknown). There is a large amount of perpetrators whose age and race are unknown, which is something to keep in mind. 
+
+---
+
+Let's look at the breakdown across locations
+
+```{r locations}
+locs = nypd_data_edited %>% group_by(BORO, STATISTICAL_MURDER_FLAG) %>% summarize(n = n())
+
+bar = ggplot(locs, aes(x=BORO, y=n, fill=STATISTICAL_MURDER_FLAG)) +
+  geom_bar(position = "dodge", stat = "identity") +
+  ggtitle("Total NYC Shooting Incidents 2006-2020 by Borough") +
+  scale_fill_discrete(name="", labels = c("Incident", "Homicide")) +
+  xlab("Borough") +
+  ylab("Number")
+bar
+```
+```{r loc_output, include=FALSE}
+ggsave(file="graph_loc.svg", plot = bar, height = 4.5, width = 8)
+```
+
+## Logistic Regression
+
+Let's see if perpetrator race and age can predict whether it's a homicide.  
+
+```{r log}
+# filter out odd age group values
+data_fixed = filter(nypd_data_edited, PERP_AGE_GROUP %in% c("<18","18-24","25-44","45-64","65+","UNKNOWN"))
+
+# train a logistic model
+train_ratio = createDataPartition(data_fixed$STATISTICAL_MURDER_FLAG, p=0.7, list=F)
+train_data = data_fixed[train_ratio, ]
+test_data = data_fixed[-train_ratio, ]
+log.model = glm(STATISTICAL_MURDER_FLAG ~ PERP_RACE + PERP_AGE_GROUP, family = "binomial", data = train_data)
+summary(log.model)
+
+# Create confusion matrix
+predict = predict(log.model, test_data, type = 'response')
+table_mat = table(test_data$STATISTICAL_MURDER_FLAG, predict > 0.5)
+table_mat
+
+# Calculate accuracy
+accuracy_test = sum(diag(table_mat)) / sum(table_mat)
+accuracy_test
+```
+
+Perpetrator race did not have any significant ability to predict homicide. Perpetrator age did, though, except for 18-24 year olds. There were a lot of false negatives and the accuracy was 80.9 percent. 
+
+## Bias
+
+One thing to note is that these are only the reported firearm incidents. We have no idea of how many unreported incidents there could be. Also this dataset doesn't include crimes where a firearm was used but not discharged. Systemically, maybe the NYPD knows that young, Black men are more likely to be involved in shooting incidents and are more likely to patrol black neighbourhoods and are then more likely to respond to and report incidents there. We don't know if firearm incidents involving the police discharging firearms are counted in the data. Without considering the total population of New York (to get a per-capita rate of firearm incident or homicide) it may be easy to conclude that it's a dangerous place to live or visit. I won't make any judgements on this until I have a bigger picture.
+
+## Conclusion
+
+This dataset contains demographic and geographic information about shooting perpetrators and victims in New York. There is some missing and some unknown data. An overall trend of decreasing incidents, until the start of the pandemic can be observed. Homicides were a fraction of firearm incidents. Homicide victims were predominantly black. Perpetrators were largely younger than 45, Black, Hispanic or unknown. A logistic model was attempted to predict occurrence of homicide from age and race, but only age could. 
